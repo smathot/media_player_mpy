@@ -1,0 +1,18 @@
+author: Daniel Schreij
+category: Media
+description: Media player based on the moviepy library which uses ffmpeg
+url: http://www.vupsy.nl/members/daniel-schreij
+controls:
+-
+    label: My line edit control
+    name: line_edit_widget
+    tooltip: You can type something here
+    type: line_edit
+    var: my_line_edit_var
+-
+    label: My line checkbox control
+    name: checkbox_widget
+    tooltip: You can type something here
+    type: checkbox
+    var: my_checkbox_var
+
