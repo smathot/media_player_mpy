@@ -4,11 +4,10 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-# MoviePy and pyaudio
+# MoviePy
 try:
 	from moviepy.video.io.VideoFileClip import VideoFileClip
 	from moviepy.tools import cvsecs
-	import pyaudio
 except ImportError as e:
 	print("""Error importing dependencies:
 {0}
@@ -17,7 +16,6 @@ This module depends on the following packages
 
 - MoviePy
 - ImageIO
-- PyAudio
 
 Please make sure that they are installed.""".format(e))
 
@@ -28,63 +26,146 @@ import threading
 
 # constants to indicate player status
 UNINITIALIZED = 0	# No video file loaded
-READY = 1
+READY = 1			# Video file loaded and ready to start
 PAUSED = 2		# Playback is paused
 PLAYING = 3		# Player is playing
 EOS = 4			# End of stream has been reached
 
 # constants to indicate clock status
-PAUSED = 1
-RUNNING = 2
-STOPPED = 3
+RUNNING = 1		# Clock is ticking
+# Clock uses PAUSED status from player variables above
+STOPPED = 3		# Clock has been stopped and is reset
 
-class Clock(object):
-	""" Clock functions as a stopwatch to measure time from an arbitrary 
-	starting point. It runs in a separate thread and can time can be polled
-	by checking the property clock.time """
+class Timer(object):
+	""" Timer serves as a stopwatch to measure time from an arbitrary 
+	starting point. It runs in a separate thread and time can be polled
+	by checking its property clock.time """
 		
-	def __init__(self):
-		""" Constructor """
-		self.starttime = time.time()
-		self.elapsed_time = 0
+	def __init__(self, fps=None, max_duration=None):
+		""" Constructor """		
 		self.status = PAUSED
+		self.max_duration = max_duration
+		self.fps = fps
+		self.reset()
 		
 	def reset(self):
-		""" Reset the clock to 0 """
-		self.starttime = time.time()
-		self.elapsed_time = 0
+		""" Reset the clock to 0 by emptying previous intervals"""		
+		self.previous_intervals = []
+		self.current_interval_duration = 0.0
 		
 	def pause(self):
+		""" Pauses the clock to continue running later 
+		Saves the duration of the current interval in the previous_intervals list."""
 		if self.status == RUNNING:
 			self.status = PAUSED
+			self.previous_intervals.append(time.time() - self.interval_start)
+			self.current_interval_duration = 0.0
 		elif self.status == PAUSED:
+			self.interval_start = time.time()
 			self.status = RUNNING
 			
 	def start(self):
-		self.thread = threading.Thread(target=self.__run)
-		self.status = RUNNING
-		self.reset()
-		self.thread.start()
+		""" Start the clock from 0. Uses a separate thread to handle the timing
+		functionalities. """
+		if not hasattr(self,"thread") or not self.thread.isAlive():		
+			self.thread = threading.Thread(target=self.__run)
+			self.status = RUNNING
+			self.reset()
+			self.thread.start()
+		else:
+			print("Clock already running!")
 					
 	def __run(self):
+		""" Internal function that is run in a separate thread. Do not call directly. """
+		self.interval_start = time.time()
 		while self.status != STOPPED:
 			if self.status == RUNNING:
-				self.elapsed_time = time.time() - self.starttime
-			# One refresh per 5 milliseconds seems enough
-			time.sleep(0.005)
+				self.current_interval_duration = time.time() - self.interval_start
 				
+			# If max_duration is set, stop the clock if it is reached
+			if self.max_duration and self.time > self.max_duration:
+				self.status == STOPPED
+				
+			# One refresh per 5 milliseconds seems enough
+			time.sleep(0.001)
+	
+	""" Stop the clock. Also resets the internal timers """
 	def stop(self):
 		self.status = STOPPED
 		self.reset()
 		
 	@property
 	def time(self):
-		return self.elapsed_time
+		""" Returns the current logged time of the clock """
+		return sum(self.previous_intervals) + self.current_interval_duration
+		
+	@property
+	def current_frame(self):
+		if not self.__fps:
+			raise RuntimeError("fps not set so current frame number cannot be calculated")
+		else:
+			return int(self.__fps * self.time)
+	
+	@property
+	def frame_interval(self):
+		""" The duration of a frame in seconds """
+		if not self.__fps:
+			raise RuntimeError("fps not set so current frame interval cannot be calculated")
+		else:
+			return 1.0/self.__fps
+			
+	@property
+	def fps(self):
+		""" Return the frames per second that is set in clock """
+		return self.__fps
+	
+	@fps.setter
+	def fps(self,value):
+		""" Sets the frames per second of the current movie the clock is used for. 
+		
+		Arguments:
+		-- value (float), the value for fps
+		"""
+		if not value is None:
+			if not type(value) == float:
+				raise ValueError("fps needs to be specified as a float")
+			if value<1.0:
+				raise ValueError("fps needs to be greater than 1.0")
+		self.__fps = value
+
+	@property		
+	def max_duration(self):
+		""" Return the max duration the clock should run for. (Usually the
+		duration of the videoclip) """
+		return self.__max_duration
+		
+	@max_duration.setter
+	def max_duration(self,value):
+		""" Set the value of max duration
+		
+		Arguments:
+		-- value (float), the value for fps
+		"""
+		if not value is None:
+			if not type(value) == float:
+				raise ValueError("max_duration needs to be specified as a float")
+			if value<1.0:
+				raise ValueError("max_duration needs to be greater than 1.0")
+		self.__max_duration = value
+					
+	def __repr__(self):
+		""" Create a string representation for the print function"""
+		if self.__fps:
+			return "Clock [current time: {0}, fps: {1}, current_frame: {2}]".format(self.time, self.__fps, self.current_frame)
+		else:
+			return "Clock [current time: {0}]".format(self.time)
 		
 	
 class Player(object):
+	""" This class loads a video file that can be played. It returns video and audioframes, but can also
+	be passed a callback function that can take care of the rendering elsewhere. """
 
-	def __init__(self, videofile=None, renderfunc=None, play_audio=True):
+	def __init__(self, videofile=None, videorenderfunc=None, audiorenderfunc=None, play_audio=True):
 		"""
 		Constructor
 		
@@ -98,26 +179,59 @@ class Player(object):
 						- frame (numpy array): the frame to be rendered
 		play_audio --  Whether audio of the clip should be played (default: True)
 		"""
+		# Create an internal timer
+		self.clock = Timer()		
 		
 		# Load a video file if specified, but allow users to do this later
-		# by initializing all variables to None		
+		# by initializing all variables to None	
 		if not self.load_video(videofile, play_audio):
 			self.reset()
 		
+		## Set callback functions if set
+		
 		# Check if renderfunc is indeed a function
-		if hasattr(renderfunc, '__call__'):
-			self.renderfunc = renderfunc
-	
+		if not videorenderfunc is None:
+			if not hasattr(videorenderfunc, '__call__'):
+				raise TypeError("The object passed for videorenderfunc is not function")
+		self.videorenderfunc = videorenderfunc
+			
+		if not audiorenderfunc is None:
+			if not hasattr(audiorenderfunc, '__call__'):
+				raise TypeError("The object passed for audiorenderfunc is not function")
+		self.audiorenderfunc = audiorenderfunc
+		
+		self.play_audio = play_audio
+
+	@property			
+	def frame_interval(self):
+		""" Duration in seconds of a single frame """
+		return self.clock.frame_interval
+		
+	@property
+	def current_frame_no(self):
+		""" Current frame_no of video """
+		return self.clock.current_frame
+		
+	@property
+	def current_videoframe(self):
+		""" Representation of current video frame as a numpy array """
+		return self.__current_videoframe
+		
+	@property
+	def current_playtime(self):
+		""" Clocks current runtime in seconds """
+		return self.clock.time
+			
 	def reset(self):
 		self.clip = None
 		self.loaded_file = None
-		self.audiostream = None
+		self.audio = None
+		
 		self.fps = None
-		self.frame_interval = None
 		self.duration = None
-		self.current_playtime = None
-		self.frame_no = None
+		
 		self.status = UNINITIALIZED
+		self.clock.reset()
 		
 	def load_video(self, videofile, play_audio=True):
 		if not videofile is None:
@@ -125,31 +239,26 @@ class Player(object):
 				self.clip = VideoFileClip(videofile,audio=play_audio)
 				
 				if play_audio and self.clip.audio:
-					# If clip has audio and it needs to be played,
-					# create a pyaudio to pass the sound to later
-					p = pyaudio.PyAudio()
-					self.audio_out = p.open(
-						format   = pyaudio.paInt16,
-						channels = self.clip.audio.nchannels,
-						rate     = self.clip.audio.fps,
-						output   = True
-					)
+					self.audio = {
+						'bits':  		16,
+						'channels': 	self.clip.audio.nchannels,
+						'rate':	 	self.clip.audio.fps,
+					}
+				else:
+					self.audio = None
 					
-				self.duration = self.clip.duration
 				self.loaded_file = os.path.split(videofile)[1]
 				
 				## Timing variables
+				# Clip duration
+				self.duration = self.clip.duration
+				self.clock.max_duration = self.clip.duration
 				# Frames per second of clip
 				self.fps = self.clip.fps
-				# Duration in seconds of one frame
-				self.frame_interval = 1.0/self.fps
-				# Current position in video in seconds
-				self.current_playtime = 0.0
-				# Current frame
-				self.frame_no = 0
+				self.clock.fps = self.clip.fps
 					
 				print("Loaded {0}".format(videofile))		
-				self.status = PAUSED
+				self.status = READY
 				return True
 			else:
 				raise IOError("File not found: {0}".format(videofile))
@@ -180,20 +289,58 @@ class Player(object):
 			self.status = PLAYING
 			
 		# Play while end of stream has not been reached
-		while not self.status == EOS:
-			# Only render frames and run time if state is not paused 
-			if self.status == PAUSED:
-				continue
+		self.last_frame_no = 0
+		
+		if not hasattr(self,"thread") or not self.thread.isAlive():	
+			self.thread = threading.Thread(target=self.__render)
+			self.thread.start()
+			self.clock.start()
+		else:
+			print("Rendering thread already running!")
+		
+	def __render(self):
+		""" Main rendering loop """
+		while self.status in [PLAYING,PAUSED]:
+			current_frame_no = self.clock.current_frame
+			current_time = self.clock.time
+
+			# Check if end of clip has been reached
+			if current_time > self.duration:
+				self.status = EOS
+				break
 			
-						
+			if self.last_frame_no != current_frame_no:
+				new_videoframe = self.clip.get_frame(current_time)
+				new_audioframe = None
+				if self.videorenderfunc:
+					self.videorenderfunc(new_videoframe)
+				if self.play_audio and self.audiorenderfunc:
+					self.audiorenderfunc(new_audioframe)
+				
+				self.__current_videoframe = new_videoframe
+				self.__current_audioframe = new_audioframe
+				
+				
+			self.last_frame_no = current_frame_no
+			time.sleep(0.5*self.frame_interval)
+		
+		self.clock.stop()
+		print("Rendering stopped!")
+		
 			
 	def pause(self):
 		""" Change playback status only if current status is PLAYING or
 		PAUSED (and not READY) """
 		if self.status == PAUSED:
 			self.status = PLAYING
+			self.clock.pause()
 		if self.status == PLAYING:
 			self.status = PAUSED
+			self.clock.pause()
+	
+	def stop(self):
+		self.clock.stop()
+		self.status = READY
 		
 	# Object specific functions	
 	def __repr__(self):
@@ -204,7 +351,6 @@ class Player(object):
 		is called """
 		return "Player [file loaded: {0}]".format(self.loaded_file)
 		
-				
 if __name__ == "__main__":
 	def render(frame):
 		print(frame)
