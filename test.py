@@ -32,7 +32,7 @@ class videoPlayer():
 
 		self.player = player.Player(
 			videorenderfunc=self.__texUpdate,
-			audiorenderfunc=self.__audiorenderer
+			#audiorenderfunc=self.__audiorenderer
 		)
 
 
@@ -204,7 +204,7 @@ if __name__ == '__main__':
 		print sys.stderr, "Please supply a video file"
 		sys.exit(0)
 	#vidSource = "e:/Movies/bbb_sunflower_1080p_30fps_normal.mp4"
-	windowRes = (1680, 1050)
+	windowRes = (800, 600)
 	myVideoPlayer = videoPlayer(windowRes,fullscreen = False)
 	myVideoPlayer.load_video(vidSource)
 	myVideoPlayer.play()

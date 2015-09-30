@@ -321,15 +321,14 @@ class Player(object):
 
 			if self.last_frame_no != current_frame_no:
 				new_videoframe = self.clip.get_frame(current_time)
-				new_audioframe = self.audiochunks.next()
 				if self.play_audio and self.audiorenderfunc:
+					new_audioframe = self.audiochunks.next()
 					self.audiorenderfunc(new_audioframe)
+					self.__current_audioframe = new_audioframe
 				if self.videorenderfunc:
 					self.videorenderfunc(new_videoframe)
 
-
 				self.__current_videoframe = new_videoframe
-				self.__current_audioframe = new_audioframe
 
 
 			self.last_frame_no = current_frame_no
