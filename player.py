@@ -8,6 +8,7 @@ from __future__ import unicode_literals
 try:
 	from moviepy.video.io.VideoFileClip import VideoFileClip
 	from moviepy.tools import cvsecs
+	import numpy as np
 except ImportError as e:
 	print("""Error importing dependencies:
 {0}
@@ -16,6 +17,7 @@ This module depends on the following packages
 
 - MoviePy
 - ImageIO
+- Numpy
 
 Please make sure that they are installed.""".format(e))
 
@@ -33,9 +35,9 @@ PLAYING = 3		# Player is playing
 EOS = 4			# End of stream has been reached
 
 # constants to indicate clock status
-RUNNING = 1		# Clock is ticking
+RUNNING = 5		# Clock is ticking
 # Clock uses PAUSED status from player variables above
-STOPPED = 3		# Clock has been stopped and is reset
+STOPPED = 6		# Clock has been stopped and is reset
 
 class Timer(object):
 	""" Timer serves as a stopwatch to measure time from an arbitrary
@@ -90,8 +92,8 @@ class Timer(object):
 			# One refresh per 5 milliseconds seems enough
 			time.sleep(0.001)
 
-	""" Stop the clock. Also resets the internal timers """
 	def stop(self):
+		""" Stop the clock. Also resets the internal timers """
 		self.status = STOPPED
 		self.reset()
 
@@ -193,12 +195,12 @@ class Player(object):
 		# Check if renderfunc is indeed a function
 		if not videorenderfunc is None:
 			if not hasattr(videorenderfunc, '__call__'):
-				raise TypeError("The object passed for videorenderfunc is not function")
+				raise TypeError("The object passed for videorenderfunc is not a function")
 		self.videorenderfunc = videorenderfunc
 
 		if not audiorenderfunc is None:
 			if not hasattr(audiorenderfunc, '__call__'):
-				raise TypeError("The object passed for audiorenderfunc is not function")
+				raise TypeError("The object passed for audiorenderfunc is not a function")
 		self.audiorenderfunc = audiorenderfunc
 
 		self.play_audio = play_audio
@@ -231,7 +233,6 @@ class Player(object):
 	def reset(self):
 		self.clip = None
 		self.loaded_file = None
-		self.audio = None
 
 		self.fps = None
 		self.duration = None
@@ -246,16 +247,18 @@ class Player(object):
 
 				if play_audio and self.clip.audio:
 					self.audioformat = {
-						'nbytes':  	2,
-						'nchannels': 	self.clip.audio.nchannels,
-						'fps':	 	self.clip.audio.fps,
+						'nbytes':  	  2,
+						'nchannels': 	  self.clip.audio.nchannels,
+						'fps':	 	  self.clip.audio.fps,
+						'chunkduration': 1.0/self.clip.fps
 					}
 
-					self.audiochunks = self.clip.audio.iter_chunks(
-						chunk_duration = 1.0/self.clip.fps
-					)
+#					self.audiochunks = self.clip.audio.iter_chunks(
+#						chunk_duration = 1.05/self.clip.fps,
+#						quantize=True
+#					)
 				else:
-					self.audio = None
+					self.audioformat = None
 
 				self.loaded_file = os.path.split(videofile)[1]
 
@@ -301,15 +304,28 @@ class Player(object):
 		# Play while end of stream has not been reached
 		self.last_frame_no = 0
 
-		if not hasattr(self,"thread") or not self.thread.isAlive():
-			self.thread = threading.Thread(target=self.__render)
-			self.thread.start()
-			self.clock.start()
+		if not hasattr(self,"renderloop") or not self.renderloop.isAlive():
+			# Create flag to set when new videoframe is available
+			self.new_videoframe_available = threading.Event()
+			self.videoframe_handler = threading.Thread(target=self.__render_videoframe)
+			self.videoframe_handler.start()
+		
+			self.renderloop = threading.Thread(target=self.__render)
+			self.renderloop.start()									
 		else:
 			print("Rendering thread already running!")
 
 	def __render(self):
-		""" Main rendering loop """
+		""" Main render loop. Checks clock if new video and audio frames 
+		need to be rendered. Is so, it passes the frames or signals on to
+		functions that take care of rendering these frames """	
+		
+		# Start videoclock with start of this thread
+		self.clock.start()
+
+		next_audio_refresh_t = 0
+
+		# Main rendering loop
 		while self.status in [PLAYING,PAUSED]:
 			current_frame_no = self.clock.current_frame
 			current_time = self.clock.time
@@ -320,22 +336,55 @@ class Player(object):
 				break
 
 			if self.last_frame_no != current_frame_no:
-				new_videoframe = self.clip.get_frame(current_time)
-				if self.play_audio and self.audiorenderfunc:
-					new_audioframe = self.audiochunks.next()
+				# Signal videoframe rendering thread that a new frame
+				# can be grabbed from the stream and displayed
+				self.new_videoframe_available.set()				
+				
+			if self.audioformat and self.status in [PLAYING,PAUSED] \
+			   and current_time >= next_audio_refresh_t:
+				next_audio_refresh_t = current_time+5*self.frame_interval
+				# Get current time boundaries for audiochunk to retrieve					
+				interval = np.arange(
+					int(self.audioformat['fps']*current_time), 
+					int(self.audioformat['fps']*next_audio_refresh_t),
+				)				
+				
+				# Retrieve audiochunk
+				new_audioframe = self.clip.audio.to_soundarray(
+					tt = (1.0/self.audioformat['fps'])*interval,
+					buffersize = self.frame_interval*self.clip.audio.fps,
+					quantize=True
+				)
+
+				if self.audiorenderfunc:
 					self.audiorenderfunc(new_audioframe)
-					self.__current_audioframe = new_audioframe
-				if self.videorenderfunc:
-					self.videorenderfunc(new_videoframe)
-
-				self.__current_videoframe = new_videoframe
-
-
+				self.__current_audioframe = new_audioframe
+					
 			self.last_frame_no = current_frame_no
-			time.sleep(0.5*self.frame_interval)
+			time.sleep(0.01)
 
 		self.clock.stop()
 		print("Rendering stopped!")
+
+	def __render_videoframe(self):
+		""" Handles a new videoframe once it's there. Is to be run in a separate
+		thread so it does not break audio playback, if computer is too slow to render
+		video frames at sufficient speed. """
+		
+		print("Videorender function waiting")
+		self.new_videoframe_available.wait()
+		
+		# Only let this thread run as long as players status is paused or playing
+		while self.status in [PLAYING,PAUSED]:
+			# Wait for signal from renderloop that new frame is available
+			self.new_videoframe_available.wait()
+			# Get da frame!
+			new_videoframe = self.clip.get_frame(self.clock.time)
+			# Pass it to the callback function if this is set
+			if self.videorenderfunc:
+				self.videorenderfunc(new_videoframe)
+			# Set current_frame to current frame (...)
+			self.__current_videoframe = new_videoframe
 
 
 	def pause(self):

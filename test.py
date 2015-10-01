@@ -8,16 +8,65 @@ Created on Wed Sep 30 15:46:24 2015
 import os
 import sys
 import pygame
-import time
+import pyaudio
 
 from OpenGL.GL import *
 import numpy as np
 
-
 import player
 
+class SoundrendererPygame(object):
+	""" Uses pygame.mixer to play sound """
+	def __init__(self, audioformat):
+		fps 		= audioformat["fps"]
+		nchannels = audioformat["nchannels"]
+		nbytes    = audioformat["nbytes"]
+		
+		pygame.mixer.quit()
+		print "Using pygame mixer with {0}".format(audioformat)
+		pygame.mixer.init(fps, -8 * nbytes, nchannels, 1024)
+		
+	def write(self, frame):
+		""" write frame to output channel """
+		chunk = pygame.sndarray.make_sound(frame)
+		if not hasattr(self,"channel"):
+			self.channel = chunk.play()
+		else:
+			self.channel.queue(chunk)
+			
+	def close(self):
+		""" Cleanup (done by pygame.quit() in main loop) """
+		pass
+	
+class SoundrendererPyAudio(object):
+	""" Uses pyaudio to play sound """
+	def __init__(self, audioformat):
+		fps 		= audioformat["fps"]
+		nchannels = audioformat["nchannels"]
+		nbytes    = audioformat["nbytes"]
+		
+		p = pyaudio.PyAudio()
+		self.channel = p.open(
+			channels  = nchannels,
+			rate 	= fps,
+			format 	= pyaudio.get_format_from_width(nbytes),
+			output=True
+		)
+		
+	def write(self, frame):
+		""" write frame to output channel """
+		self.channel.write(frame.data)
+		
+	def close(self):
+		""" cleanup """
+		self.channel.stop_stream()
+		self.channel.close()
+
+
+
+
 class videoPlayer():
-	def __init__(self, (windowWidth, windowHeight), fullscreen = False):
+	def __init__(self, (windowWidth, windowHeight), fullscreen = False, soundrenderer="pygame"):
 		pygame.init()
 		flags = pygame.DOUBLEBUF|pygame.OPENGL|pygame.HWSURFACE
 		self.fullscreen = fullscreen
@@ -25,6 +74,9 @@ class videoPlayer():
 			flags = flags | pygame.FULLSCREEN
 		pygame.display.set_mode((windowWidth,windowHeight), flags)
 		self.windowSize = (windowWidth, windowHeight)
+
+		self.soundrenderer=soundrenderer		
+		
 		self.printed = False
 		self.texUpdated = False
 
@@ -32,7 +84,7 @@ class videoPlayer():
 
 		self.player = player.Player(
 			videorenderfunc=self.__texUpdate,
-			#audiorenderfunc=self.__audiorenderer
+			audiorenderfunc=self.__audiorenderer
 		)
 
 
@@ -93,16 +145,11 @@ class videoPlayer():
 
 		self.__textureSetup()
 
-		if(self.player.audio):
-			try:
-				pygame.mixer.quit()
-				fps 		= self.player.audioformat["fps"] ,
-				nchannels = self.player.audioformat["nchannels"]
-				nbytes    = self.player.audioformat["nbytes"]
-				pygame.mixer.init(fps, -8 * nbytes, nchannels, 1024)
-			except:
-				Exception("Pygame mixer could not be initialized!")
-
+		if(self.player.audioformat):
+			if self.soundrenderer == "pygame":
+				self.audio_out = SoundrendererPygame(self.player.audioformat)	
+			if self.soundrenderer == "pyaudio":
+				self.audio_out = SoundrendererPyAudio(self.player.audioformat)	
 
 	def __textureSetup(self):
 		# Setup texture in OpenGL to render video to
@@ -141,12 +188,7 @@ class videoPlayer():
 		self.texUpdated = True
 
 	def __audiorenderer(self, frame):
-		chunk = pygame.sndarray.make_sound(frame)
-		if not hasattr(self,"channel"):
-			self.channel = chunk.play()
-		else:
-			self.channel.queue(chunk)
-
+		self.audio_out.write(frame)
 
 	def drawFrame(self):
 		glCallList(self.frameQuad)
@@ -162,13 +204,13 @@ class videoPlayer():
 		# While video is playing, render frames
 		while self.player.status in [player.PLAYING, player.PAUSED]:
 			if self.texUpdated:
-				#t1 = time.time()
+				# t1 = time.time()
 				# Update texture
 				glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, self.vidsize[0], self.vidsize[1], GL_RGB, GL_UNSIGNED_BYTE, self.buffer)
-				#t2 = time.time()
+				# t2 = time.time()
 				#print "Texture updated in {0} ms".format(int((t2-t1)*1000))
 				self.drawFrame()
-				#print "Frame drawn in {0} ms".format(round((time.time()-t2)*1000))
+				# print "Frame drawn in {0} ms".format(round((time.time()-t2)*1000))
 
 			for e in pygame.event.get():
 				if e.type == pygame.QUIT:
@@ -181,7 +223,10 @@ class videoPlayer():
 
 			pygame.event.pump()   # Prevent freezing of screen while dragging window
 		pygame.quit()
-
+		
+		if self.player.audioformat:
+			self.audio_out.close()
+				
 	def stop(self):
 		self.player.stop()
 
@@ -203,8 +248,9 @@ if __name__ == '__main__':
 	except:
 		print sys.stderr, "Please supply a video file"
 		sys.exit(0)
-	#vidSource = "e:/Movies/bbb_sunflower_1080p_30fps_normal.mp4"
+
 	windowRes = (800, 600)
-	myVideoPlayer = videoPlayer(windowRes,fullscreen = False)
+	myVideoPlayer = videoPlayer(windowRes,fullscreen = False, soundrenderer="pygame")
 	myVideoPlayer.load_video(vidSource)
+	print "Starting video"
 	myVideoPlayer.play()
