@@ -46,7 +46,7 @@ class SoundrendererPyAudio(object):
 		nbytes    = audioformat["nbytes"]
 		
 		p = pyaudio.PyAudio()
-		self.channel = p.open(
+		self.stream = p.open(
 			channels  = nchannels,
 			rate 	= fps,
 			format 	= pyaudio.get_format_from_width(nbytes),
@@ -55,12 +55,12 @@ class SoundrendererPyAudio(object):
 		
 	def write(self, frame):
 		""" write frame to output channel """
-		self.channel.write(frame.data)
+		self.stream.write(frame.data)
 		
 	def close(self):
 		""" cleanup """
-		self.channel.stop_stream()
-		self.channel.close()
+		self.stream.stop_stream()
+		self.stream.close()
 
 
 
@@ -134,6 +134,8 @@ class videoPlayer():
 	def load_video(self, vidSource):
 		if not os.path.exists(vidSource):
 			print >> sys.stderr, "File not found: " + vidSource
+			pygame.display.quit()
+			pygame.quit()
 			sys.exit(1)
 
 		self.player.load_video(vidSource)
