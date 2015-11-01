@@ -448,8 +448,6 @@ class psychopy_handler(OpenGL_renderer):
 
 		Arguments:
 		frame - the video frame supplied as a str/bytes object
-		frame_on_time - (True|False) indicates if renderer is lagging behind
-			internal frame counter of the player (False) or is still in sync (True)
 		"""		
 		self.frame = frame
 		
@@ -535,6 +533,10 @@ class psychopy_handler(OpenGL_renderer):
 			continue_playback = False	
 		
 		return continue_playback
+		
+#---------------------------------------------------------------------
+# Main player class -- communicates with MoviePy
+#---------------------------------------------------------------------
 
 class media_player_mpy(item):
 	description = u'Media player based on moviepy'	
@@ -545,7 +547,7 @@ class media_player_mpy(item):
 			Initialize/ reset the plug-in.
 		"""
 		# Set default experimental variables and values	
-		self.var.video_src 			= ""
+		self.var.video_src 			= u""
 		self.var.duration 			= u"keypress"
 		self.var.resizeVideo 			= u"yes"
 		self.var.playaudio 			= u"yes"
@@ -576,12 +578,12 @@ class media_player_mpy(item):
 		# Prepare your plug-in here.
 		
 		# Set handler of frames and user input
-		if self.has("canvas_backend"):
-			if self.get("canvas_backend") == u"legacy" or self.get("canvas_backend") == u"droid":				
+		if type(self.var.canvas_backend) in [unicode,str]:
+			if self.var.canvas_backend == u"legacy" or self.var.canvas_backend == u"droid":				
 				self.handler = legacy_handler(self, self.experiment.surface, custom_event_handler)
-			if self.get("canvas_backend") == u"psycho":				
+			if self.var.canvas_backend == u"psycho":				
 				self.handler = psychopy_handler(self, self.experiment.window, custom_event_handler)
-			if self.get("canvas_backend") == u"xpyriment":			
+			if self.var.canvas_backend == u"xpyriment":			
 				# Expyriment uses OpenGL in fullscreen mode, but just pygame 
 				# (legacy) display mode otherwise
 				if self.experiment.fullscreen:				
@@ -592,11 +594,33 @@ class media_player_mpy(item):
 			# Give a sensible error message if the proper back-end has not been selected
 			raise osexception(u"The media_player plug-in could not determine which backend was used!")		
 
+
+		if self.var.playaudio == u"yes":
+			playaudio = True
+		else:
+			playaudio = False
+			
 		self.player = player.Player(
-			videorenderfunc=self.handler,
-			audiorenderfunc=self.__audiorenderer
-		)	
-	
+			videorenderfunc=self.handler.handle_videoframe,
+			audiorenderfunc=self.__render_audioframe,
+			play_audio=playaudio
+		)
+		
+		# Load video file to play
+		if self.var.video_src == u"":
+			raise osexception(u"No video file was set")
+		elif not os.path.exists(self.var.video_src):
+			raise osexception(u"Invalid path to video file (file not found)")
+		# Load the video file. Returns false if this failed
+		elif not self.player.load_video(self.var.video_src):
+			raise osexception(u"Video file could not be loaded")
+			
+		# Set audiorenderer
+		if self.var.playaudio == u"yes" and self.player.audioformat:
+			if self.var.soundrenderer == u"pygame":
+				self.audio_handler = SoundrendererPygame(self.player.audioformat)
+			elif self.var.soundrenderer == u"pyaudio":
+				self.audio_handler = SoundrendererPyAudio(self.player.audioformat)
 		# Report success		
 	
 		return True
@@ -606,7 +630,44 @@ class media_player_mpy(item):
 		self.set_item_onset()
 		# Run your plug-in here.
 		
+		# Signal player to start video playback
+		self.paused = False
 		
+		# Prepare frame renderer in handler for playback
+		# (e.g. set up OpenGL context, thus only relevant for OpenGL based backends)
+		self.handler.prepare_for_playback()
+
+		### Main player loop. While True, the movie is playing
+		start_time = time.time()
+		self.player.play()
+
+		# While video is playing, render frames
+		while self.player.status in [player.PLAYING, player.PAUSED]:
+			if self.__frame_updated:
+				# Draw current frame to screen
+				self.handler.draw_frame()
+				
+				# Swap buffers to show drawn stuff on screen
+				self.handler.swap_buffers()
+				# Reset updated flag
+				self.__frame_updated = False
+						
+			# Handle input events								
+			if self._event_handler_always:
+				self.playing = self.handler.process_user_input_customized()
+			elif not self._event_handler_always:				
+				self.playing = self.handler.process_user_input()
+							
+			# Determine if playback should continue when a time limit is set
+			if type(self.duration) == int:
+				if time.time() - start_time > self.duration:
+					self.stop()		
+
+		# Restore OpenGL context as before playback
+		self.handler.playback_finished()
+		
+		if self.player.audioformat:
+			self.audio_out.close()
 		
 	def calculate_scaled_resolution(self, screen_res, image_res):
 		"""Calculate image size so it fits the screen
@@ -626,7 +687,27 @@ class media_player_mpy(item):
 		else:
 			return (screen_res[0], int(image_res[1]*screen_res[0]/image_res[0]))
 
-class qtmy_plugin(my_plugin, qtautoplugin):
+	def __render_audioframe(self, frame):
+		self.audio_handler.write(frame)
+		
+	def __handle_videoframe(self, frame):
+		self.__frame_updated = True
+		self.handler.handle_videoframe(frame)
+		
+	def stop(self):
+		self.player.stop()
+		
+	def pause(self):
+		if self.player.status == player.PAUSED:
+			self.player.pause()
+			self.paused = False
+		elif self.player.status == player.PLAYING:
+			self.player.pause()
+			self.paused = True
+		else:
+			print "Player not in pausable state"
+
+class qtmy_plugin(media_player_mpy, qtautoplugin):
 
 	def __init__(self, name, experiment, script=None):
 

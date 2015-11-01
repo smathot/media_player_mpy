@@ -252,11 +252,6 @@ class Player(object):
 						'fps':	 	  self.clip.audio.fps,
 						'chunkduration': 1.0/self.clip.fps
 					}
-
-#					self.audiochunks = self.clip.audio.iter_chunks(
-#						chunk_duration = 1.05/self.clip.fps,
-#						quantize=True
-#					)
 				else:
 					self.audioformat = None
 
