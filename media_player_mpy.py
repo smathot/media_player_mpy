@@ -36,6 +36,9 @@ from libopensesame.item import item
 from libqtopensesame.items.qtautoplugin import qtautoplugin
 from libopensesame.exceptions import osexception
 
+# Import color factory
+from openexp.color import color
+
 import os
 import sys
 
@@ -355,23 +358,21 @@ class legacy_handler(pygame_handler):
 		"""
 		# Call constructor of super class
 		super(legacy_handler, self).__init__(main_player, screen, custom_event_code )
-
-		# Already create surfaces so this does not need to be redone for every frame
-		# The time to process a single frame should be much shorter this way.
-		self.img = pygame.Surface(self.main_player.vidsize, pygame.SWSURFACE, 24, (255, 65280, 16711680, 0))
-		# Create pygame bufferproxy object for direct surface access
-		# This saves us from using the time consuming pygame.image.fromstring() method as the frame will be
-		# supplied in a format that can be written directly to the bufferproxy
-		self.imgBuffer = self.img.get_buffer()
-		if self.main_player.fullscreen == u"yes":
-			self.dest_surface = pygame.Surface(self.main_player.destsize, pygame.SWSURFACE, 24, (255, 65280, 16711680, 0))
+		# Surface that is a 1:1 representation of the numpy array in which the frame is delivered		
+		self.src_surface = pygame.Surface(self.main_player.vidsize, pygame.HWSURFACE, 24, (255, 65280, 16711680, 0))
+		# Surface that is scaled to the destination size in which the frame is to be presented (if video has to be resized to full-screen)
+		self.dest_surface = pygame.Surface(self.main_player.destsize, pygame.HWSURFACE, 24, (255, 65280, 16711680, 0))
 
 	def prepare_for_playback(self):
 		"""
 		Setup screen for playback (Just fills the screen with the background color for this backend)
 		"""
+		# Create back-end-specific color object
+		c = color(self.main_player.experiment, self.main_player.experiment.background)
+		# Get color.backend_color, which is for example a pygame.Color object
+		
 		# Fill surface with background color
-		self.screen.fill(pygame.Color(str(self.main_player.experiment.background)))
+		self.screen.fill(c.backend_color)
 		self.last_drawn_frame_no = 0
 
 	def draw_frame(self):
@@ -383,16 +384,15 @@ class legacy_handler(pygame_handler):
 			# Only draw each frame to screen once, to give the pygame (software-based) rendering engine
 			# some breathing space
 			if self.last_drawn_frame_no != self.main_player.frame_no:
-				# Write the video frame to the bufferproxy
-				self.imgBuffer.write(self.frame, 0)
-
-				# If resize option is selected, resize frame to screen/window dimensions and blit
-				if hasattr(self, "dest_surface"):
-					pygame.transform.scale(self.img, self.main_player.destsize, self.dest_surface)
+				pygame.surfarray.blit_array(self.src_surface, self.frame)
+				
+				if self.main_player.var.resizeVideo == u"yes":
+					pygame.transform.smoothscale(self.src_surface, self.main_player.destsize, self.dest_surface)
+					# If resize option is selected, resize frame to screen/window dimensions and blit
 					self.screen.blit(self.dest_surface, self.main_player.vidPos)
 				else:
 				# In case movie needs to be displayed 1-on-1 blit directly to screen
-					self.screen.blit(self.img.copy(), self.main_player.vidPos)
+					self.screen.blit_array(self.src_surface, self.main_player.vidPos)
 
 				self.last_drawn_frame_no = self.main_player.frame_no
 
@@ -541,6 +541,10 @@ class psychopy_handler(OpenGL_renderer):
 
 class media_player_mpy(item):
 	description = u'Media player based on moviepy'
+	
+	@property
+	def frame_no(self):
+		return self.player.current_frame
 
 	def reset(self):
 		"""
@@ -558,7 +562,7 @@ class media_player_mpy(item):
 		self.var.soundrenderer 		= "pyaudio"
 
 		# Set default internal variables
-		self.texUpdated 				= False
+		self.__frame_updated 		= False
 
 		# Debugging output is only visible when OpenSesame is started with the
 		# --debug argument.
@@ -613,13 +617,14 @@ class media_player_mpy(item):
 				self.audio_handler = SoundrendererPyAudio(self.player.audioformat)
 
 		self.vidsize = self.player.clip.size
+		self.windowsize = self.experiment.resolution()
 
 		if self.var.resizeVideo == u"yes":
-			self.destsize = self.calcScaledRes(self.windowSize, self.vidsize)
+			self.destsize = self.calculate_scaled_resolution(self.windowsize, self.vidsize)
 		else:
 			self.destsize = self.vidsize
 
-		self.vidPos = ((self.windowSize[0] - self.destsize[0]) / 2, (self.windowSize[1] - self.destsize[1]) / 2)
+		self.vidPos = ((self.windowsize[0] - self.destsize[0]) / 2, (self.windowsize[1] - self.destsize[1]) / 2)
 
 		# Set handler of frames and user input
 		if type(self.var.canvas_backend) in [unicode,str]:
@@ -638,7 +643,7 @@ class media_player_mpy(item):
 			# Give a sensible error message if the proper back-end has not been selected
 			raise osexception(u"The media_player plug-in could not determine which backend was used!")
 
-		self.player.set_videoframerender_callback(self.handler.handle_videoframe)
+		self.player.set_videoframerender_callback(self.__update_videoframe)
 		self.player.set_audioframerender_callback(self.__render_audioframe)
 
 		# Report success
@@ -657,7 +662,7 @@ class media_player_mpy(item):
 		self.handler.prepare_for_playback()
 
 		### Main player loop. While True, the movie is playing
-		start_time = time.time()
+		start_time = self.experiment.clock.time()
 		self.player.play()
 
 		# While video is playing, render frames
@@ -665,24 +670,23 @@ class media_player_mpy(item):
 			if self.__frame_updated:
 				# Draw current frame to screen
 				self.handler.draw_frame()
-
 				# Swap buffers to show drawn stuff on screen
 				self.handler.swap_buffers()
 				# Reset updated flag
 				self.__frame_updated = False
 
-			# Handle input events
-			if self._event_handler_always:
-				self.playing = self.handler.process_user_input_customized()
-			elif not self._event_handler_always:
-				self.playing = self.handler.process_user_input()
+#			# Handle input events
+#			if self._event_handler_always:
+#				self.playing = self.handler.process_user_input_customized()
+#			elif not self._event_handler_always:
+			self.playing = self.handler.process_user_input()
 
 			# Determine if playback should continue when a time limit is set
-			if type(self.duration) == int:
-				if time.time() - start_time > self.duration:
+			if type(self.var.duration) == int:
+				if self.experiment.clock.time() - start_time > self.var.duration:
 					self.stop()
 
-		# Restore OpenGL context as before playback
+		# Restore OpenGL context to state before playback
 		self.handler.playback_finished()
 
 		if self.player.audioformat:
@@ -709,7 +713,7 @@ class media_player_mpy(item):
 	def __render_audioframe(self, frame):
 		self.audio_handler.write(frame)
 
-	def __handle_videoframe(self, frame):
+	def __update_videoframe(self, frame):
 		self.handler.handle_videoframe(frame)
 		self.__frame_updated = True
 
@@ -728,9 +732,7 @@ class media_player_mpy(item):
 			print "Player not in pausable state"
 
 class qtmedia_player_mpy(media_player_mpy, qtautoplugin):
-
 	def __init__(self, name, experiment, script=None):
-
 		# Call parent constructors.
 		media_player_mpy.__init__(self, name, experiment, script)
 		qtautoplugin.__init__(self, __file__)
