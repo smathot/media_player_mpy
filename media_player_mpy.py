@@ -76,7 +76,7 @@ class SoundrendererPygame(object):
 		else:
 			self.channel.queue(chunk)
 
-	def close(self):
+	def close_stream(self):
 		""" Cleanup (done by pygame.quit() in main loop) """
 		pass
 
@@ -99,7 +99,7 @@ class SoundrendererPyAudio(object):
 		""" write frame to output channel """
 		self.stream.write(frame.data)
 
-	def close(self):
+	def close_stream(self):
 		""" cleanup """
 		self.stream.stop_stream()
 		self.stream.close()
@@ -384,15 +384,16 @@ class legacy_handler(pygame_handler):
 			# Only draw each frame to screen once, to give the pygame (software-based) rendering engine
 			# some breathing space
 			if self.last_drawn_frame_no != self.main_player.frame_no:
-				pygame.surfarray.blit_array(self.src_surface, self.frame)
+				
+				pygame.surfarray.blit_array(self.src_surface, self.frame.swapaxes(0,1))
 				
 				if self.main_player.var.resizeVideo == u"yes":
-					pygame.transform.smoothscale(self.src_surface, self.main_player.destsize, self.dest_surface)
+					pygame.transform.scale(self.src_surface, self.main_player.destsize, self.dest_surface)
 					# If resize option is selected, resize frame to screen/window dimensions and blit
 					self.screen.blit(self.dest_surface, self.main_player.vidPos)
 				else:
 				# In case movie needs to be displayed 1-on-1 blit directly to screen
-					self.screen.blit_array(self.src_surface, self.main_player.vidPos)
+					self.screen.blit(self.src_surface, self.main_player.vidPos)
 
 				self.last_drawn_frame_no = self.main_player.frame_no
 
@@ -690,7 +691,7 @@ class media_player_mpy(item):
 		self.handler.playback_finished()
 
 		if self.player.audioformat:
-			self.audio_out.close()
+			self.audio_handler.close_stream()
 
 	def calculate_scaled_resolution(self, screen_res, image_res):
 		"""Calculate image size so it fits the screen
